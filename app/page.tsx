@@ -76,13 +76,22 @@ export default function SpaceShooterGame() {
 class SpaceShooter {
   canvas: HTMLCanvasElement
   ctx: CanvasRenderingContext2D
-  gameState: "menu" | "playing" | "levelComplete" | "gameOver" | "paused"
+  gameState:
+    | "mainMenu"
+    | "playing"
+    | "levelComplete"
+    | "gameOver"
+    | "paused"
+    | "levelSelect"
+    | "powerUpMenu"
+    | "settingsMenu"
   player: Player
   enemies: Enemy[]
   bullets: Bullet[]
   enemyBullets: Bullet[]
   particles: Particle[]
   powerUps: PowerUp[]
+  goldObjects: Gold[] // New: Gold objects
   explosions: Explosion[]
   level: Level
   currentLevel: number
@@ -95,22 +104,27 @@ class SpaceShooter {
   animationId: number | null
   highScore: number
   audioContext: AudioContext | null
+  backgroundMusic: HTMLAudioElement | null // New: Background music
+  musicVolume: number // New: Music volume setting
+  sfxVolume: number // New: SFX volume setting
   backgroundOffset: number
   levelTransitionTimer: number
   gameTime: number
   canUseSpecialAbility: boolean
   usingSpecialAbility: boolean
+  lastReachedLevel: number
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
     this.ctx = canvas.getContext("2d")!
-    this.gameState = "menu"
+    this.gameState = "mainMenu" // Start at main menu
     this.player = new Player(canvas.width / 2, canvas.height - 100)
     this.enemies = []
     this.bullets = []
     this.enemyBullets = []
     this.particles = []
     this.powerUps = []
+    this.goldObjects = [] // Initialize gold objects array
     this.explosions = []
     this.currentLevel = 1
     this.level = new Level(this.currentLevel)
@@ -122,7 +136,11 @@ class SpaceShooter {
     this.lastTime = 0
     this.animationId = null
     this.highScore = Number.parseInt(localStorage.getItem("spaceShooterHighScore") || "0")
+    this.lastReachedLevel = Number.parseInt(localStorage.getItem("spaceShooterLastLevel") || "1")
     this.audioContext = null
+    this.backgroundMusic = null
+    this.musicVolume = Number.parseFloat(localStorage.getItem("musicVolume") || "0.5")
+    this.sfxVolume = Number.parseFloat(localStorage.getItem("sfxVolume") || "0.5")
     this.backgroundOffset = 0
     this.levelTransitionTimer = 0
     this.gameTime = 0
@@ -130,9 +148,10 @@ class SpaceShooter {
     this.usingSpecialAbility = false
   }
 
-  init() {
+  async init() {
     this.setupEventListeners()
     this.setupAudio()
+    this.loadBackgroundMusic()
     this.gameLoop(0)
   }
 
@@ -142,6 +161,99 @@ class SpaceShooter {
     } catch (e) {
       console.log("Audio not supported")
     }
+  }
+
+  loadBackgroundMusic() {
+    try {
+      // Revert to direct assignment of the static path
+      this.backgroundMusic = new Audio("/public/audio/background-music.mp3")
+      this.backgroundMusic.loop = true
+      this.backgroundMusic.volume = this.musicVolume
+      this.backgroundMusic.autoplay = false
+
+      this.backgroundMusic.addEventListener("error", (e) => {
+        console.error("Audio loading error event:", e)
+        if (this.backgroundMusic && this.backgroundMusic.error) {
+          console.error("Audio MediaError code:", this.backgroundMusic.error.code)
+          console.error("Audio MediaError message:", this.backgroundMusic.error.message)
+        } else {
+          console.error("Audio MediaError object is null or undefined on error event.")
+        }
+      })
+
+      this.backgroundMusic.addEventListener("canplaythrough", () => {
+        console.log("Background music is ready to play.")
+      })
+    } catch (error) {
+      console.error("Error loading background music:", error)
+    }
+  }
+
+  playMusic() {
+    if (!this.backgroundMusic) {
+      console.warn("Background music object is null, cannot play.")
+      return
+    }
+
+    // If already playing, do nothing
+    if (!this.backgroundMusic.paused) {
+      return
+    }
+
+    // Attempt to play
+    const attemptPlay = () => {
+      this.backgroundMusic!.play()
+        .then(() => {
+          console.log("Background music started successfully.")
+        })
+        .catch((e) => {
+          console.error("Error attempting to play music:", e)
+          if (e instanceof DOMException) {
+            console.error("DOMException name:", e.name)
+            console.error("DOMException message:", e.message)
+            // Common autoplay error names: NotAllowedError, AbortError
+            if (e.name === "NotAllowedError") {
+              console.warn("Autoplay was prevented. User interaction might be needed.")
+            } else if (e.name === "AbortError") {
+              console.warn("Audio playback was aborted, possibly due to a previous play() call or element state.")
+            }
+          }
+        })
+    }
+
+    // If music is already ready, try to play immediately
+    if (this.backgroundMusic.readyState >= 3) {
+      // HAVE_ENOUGH_DATA
+      attemptPlay()
+    } else {
+      // Otherwise, wait for it to be ready
+      console.log("Background music not ready yet, waiting for 'canplaythrough' event.")
+      const playOnReady = () => {
+        console.log("canplaythrough event fired. Attempting to play music.")
+        attemptPlay()
+        this.backgroundMusic?.removeEventListener("canplaythrough", playOnReady)
+      }
+      this.backgroundMusic.addEventListener("canplaythrough", playOnReady)
+    }
+  }
+
+  pauseMusic() {
+    if (this.backgroundMusic && !this.backgroundMusic.paused) {
+      this.backgroundMusic.pause()
+    }
+  }
+
+  setMusicVolume(volume: number) {
+    this.musicVolume = Math.max(0, Math.min(1, volume))
+    if (this.backgroundMusic) {
+      this.backgroundMusic.volume = this.musicVolume
+    }
+    localStorage.setItem("musicVolume", this.musicVolume.toString())
+  }
+
+  setSfxVolume(volume: number) {
+    this.sfxVolume = Math.max(0, Math.min(1, volume))
+    localStorage.setItem("sfxVolume", this.sfxVolume.toString())
   }
 
   playSound(frequency: number, duration: number, type: OscillatorType = "square", volume = 0.1) {
@@ -156,7 +268,7 @@ class SpaceShooter {
     oscillator.frequency.value = frequency
     oscillator.type = type
 
-    gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime)
+    gainNode.gain.setValueAtTime(volume * this.sfxVolume, this.audioContext.currentTime) // Apply SFX volume
     gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration)
 
     oscillator.start(this.audioContext.currentTime)
@@ -170,13 +282,19 @@ class SpaceShooter {
       if (e.code === "Space") {
         e.preventDefault()
         if (this.gameState === "menu" || this.gameState === "gameOver" || this.gameState === "levelComplete") {
-          this.startGame()
+          // Handled by specific menu clicks now
         }
       }
       if (e.code === "KeyP" && this.gameState === "playing") {
         this.gameState = "paused"
+        this.pauseMusic()
       } else if (e.code === "KeyP" && this.gameState === "paused") {
         this.gameState = "playing"
+        this.playMusic()
+      }
+      if (e.code === "Escape" && this.gameState !== "mainMenu") {
+        this.gameState = "mainMenu" // Go back to main menu
+        this.pauseMusic()
       }
     })
 
@@ -216,9 +334,7 @@ class SpaceShooter {
       shootBtn.addEventListener("touchstart", (e) => {
         e.preventDefault()
         this.touchControls.shoot = true
-        if (this.gameState === "menu" || this.gameState === "gameOver" || this.gameState === "levelComplete") {
-          this.startGame()
-        }
+        // Auto-fire, so this button is just for touch feedback
       })
       shootBtn.addEventListener("touchend", (e) => {
         e.preventDefault()
@@ -239,40 +355,151 @@ class SpaceShooter {
       })
     }
 
-    // Canvas click for menu
-    this.canvas.addEventListener("click", () => {
-      if (this.gameState === "menu" || this.gameState === "gameOver" || this.gameState === "levelComplete") {
-        this.startGame()
+    // Canvas click for menu interactions
+    this.canvas.addEventListener("click", (e) => {
+      const rect = this.canvas.getBoundingClientRect()
+      const scaleX = this.canvas.width / rect.width
+      const scaleY = this.canvas.height / rect.height
+      const x = (e.clientX - rect.left) * scaleX
+      const y = (e.clientY - rect.top) * scaleY
+
+      if (this.gameState === "mainMenu") {
+        // Start Game button
+        if (x > this.canvas.width / 2 - 100 && x < this.canvas.width / 2 + 100 && y > 300 && y < 350) {
+          this.gameState = "levelSelect"
+        }
+        // Power Up button
+        if (x > this.canvas.width / 2 - 100 && x < this.canvas.width / 2 + 100 && y > 360 && y < 410) {
+          this.gameState = "powerUpMenu"
+        }
+        // Settings button
+        if (x > this.canvas.width / 2 - 100 && x < this.canvas.width / 2 + 100 && y > 420 && y < 470) {
+          this.gameState = "settingsMenu"
+        }
+      } else if (this.gameState === "levelSelect") {
+        // Back button
+        if (x > 20 && x < 120 && y > 20 && y < 70) {
+          this.gameState = "mainMenu"
+        }
+        // Level buttons
+        for (let i = 1; i <= this.lastReachedLevel; i++) {
+          const btnX = this.canvas.width / 2 - 100
+          const btnY = 220 + i * 60
+          if (x > btnX && x < btnX + 200 && y > btnY && y < btnY + 40) {
+            this.startGame(i)
+            break
+          }
+        }
+      } else if (this.gameState === "powerUpMenu") {
+        // Back button
+        if (x > 20 && x < 120 && y > 20 && y < 70) {
+          this.gameState = "mainMenu"
+        }
+        // Upgrade buttons
+        const upgradeTypes = ["damage", "defense", "health"]
+        upgradeTypes.forEach((type, index) => {
+          const cardX = this.canvas.width / 2 - 350 / 2
+          const cardY = 220 + index * 150
+          const buttonWidth = 150
+          const buttonHeight = 40
+          const buttonX = cardX + 350 - buttonWidth - 20
+          const buttonY = cardY + 120 - buttonHeight - 10
+
+          if (x > buttonX && x < buttonX + buttonWidth && y > buttonY && y < buttonY + buttonHeight) {
+            if (type === "damage") this.player.upgradeDamage()
+            else if (type === "defense") this.player.upgradeDefense()
+            else if (type === "health") this.player.upgradeHealth()
+          }
+        })
+      } else if (this.gameState === "settingsMenu") {
+        // Back button
+        if (x > 20 && x < 120 && y > 20 && y < 70) {
+          this.gameState = "mainMenu"
+        }
+
+        // Music Volume buttons
+        const musicPlusX = this.canvas.width / 2 + 100
+        const musicMinusX = this.canvas.width / 2 - 100
+        const musicY = 300
+        if (this.isClickInButton(x, y, musicMinusX, musicY, 40, 40)) {
+          this.setMusicVolume(this.musicVolume - 0.1)
+        } else if (this.isClickInButton(x, y, musicPlusX, musicY, 40, 40)) {
+          this.setMusicVolume(this.musicVolume + 0.1)
+        }
+
+        // SFX Volume buttons
+        const sfxPlusX = this.canvas.width / 2 + 100
+        const sfxMinusX = this.canvas.width / 2 - 100
+        const sfxY = 400
+        if (this.isClickInButton(x, y, sfxMinusX, sfxY, 40, 40)) {
+          this.setSfxVolume(this.sfxVolume - 0.1)
+        } else if (this.isClickInButton(x, y, sfxPlusX, sfxY, 40, 40)) {
+          this.setSfxVolume(this.sfxVolume + 0.1)
+        }
+      } else if (this.gameState === "levelComplete") {
+        // Next Level button
+        if (x > this.canvas.width / 2 - 150 && x < this.canvas.width / 2 - 50 && y > 400 && y < 450) {
+          this.startGame(this.currentLevel + 1)
+        }
+        // Main Menu button
+        if (x > this.canvas.width / 2 + 50 && x < this.canvas.width / 2 + 150 && y > 400 && y < 450) {
+          this.gameState = "mainMenu"
+          this.pauseMusic()
+        }
+      } else if (this.gameState === "gameOver") {
+        // Restart button (same as "Start Game" from main menu)
+        if (x > this.canvas.width / 2 - 100 && x < this.canvas.width / 2 + 100 && y > 480 && y < 530) {
+          this.startGame(1)
+        }
       }
     })
   }
 
-  startGame() {
-    if (this.gameState === "levelComplete") {
-      this.currentLevel++
-      this.level = new Level(this.currentLevel)
-    } else {
-      this.currentLevel = 1
-      this.level = new Level(this.currentLevel)
-      this.score = 0
-      this.lives = 3
-      this.player = new Player(this.canvas.width / 2, this.canvas.height - 100)
-    }
+  isClickInButton(clickX: number, clickY: number, btnX: number, btnY: number, btnWidth: number, btnHeight: number) {
+    return (
+      clickX > btnX - btnWidth / 2 &&
+      clickX < btnX + btnWidth / 2 &&
+      clickY > btnY - btnHeight / 2 &&
+      clickY < btnY + btnHeight / 2
+    )
+  }
 
+  startGame(level: number) {
+    this.currentLevel = level
+    this.level = new Level(this.currentLevel)
+    this.score = 0
+    this.lives = 3
+    this.player = new Player(
+      this.canvas.width / 2,
+      this.canvas.height - 100,
+      this.player.gold,
+      this.player.damageLevel,
+      this.player.defenseLevel,
+      this.player.healthLevel,
+    ) // Preserve player upgrades
     this.gameState = "playing"
     this.enemies = []
     this.bullets = []
     this.enemyBullets = []
     this.particles = []
     this.powerUps = []
+    this.goldObjects = []
     this.explosions = []
     this.enemySpawnTimer = 0
     this.backgroundOffset = 0
     this.gameTime = 0
+    this.playMusic()
   }
 
   update(deltaTime: number) {
-    if (this.gameState === "paused") return
+    if (
+      this.gameState === "paused" ||
+      this.gameState === "mainMenu" ||
+      this.gameState === "levelSelect" ||
+      this.gameState === "powerUpMenu" ||
+      this.gameState === "settingsMenu"
+    )
+      return
     if (this.gameState !== "playing") return
 
     this.gameTime += deltaTime
@@ -284,18 +511,24 @@ class SpaceShooter {
     // Update player
     this.player.update(this.keys, this.touchControls, this.canvas.width)
 
-    // Player shooting
-    if ((this.keys["Space"] || this.touchControls.shoot) && this.player.canShoot()) {
+    // Player auto-shooting
+    if (this.player.canShoot()) {
       this.player.shoot(this.bullets)
       this.playSound(800, 0.1, "square", 0.05)
     }
 
     // Special ability
-    if ((this.keys["KeyX"] || this.touchControls.special || this.canUseSpecialAbility) && this.player.canUseSpecial()) {
+    const canActivateSpecial =
+      (this.keys["KeyX"] || this.touchControls.special || this.canUseSpecialAbility) && this.player.canUseSpecial()
+
+    let specialUsedThisFrame = false
+
+    if (canActivateSpecial) {
       if (!this.usingSpecialAbility) {
         this.player.useSpecialAbility(this.bullets, this.enemies, this.particles)
         this.playSound(1200, 0.3, "sine", 0.08)
         this.usingSpecialAbility = true
+        specialUsedThisFrame = true
       }
     } else {
       this.usingSpecialAbility = false
@@ -350,6 +583,14 @@ class SpaceShooter {
       powerUp.update()
       if (powerUp.y > this.canvas.height) {
         this.powerUps.splice(index, 1)
+      }
+    })
+
+    // Update gold objects
+    this.goldObjects.forEach((gold, index) => {
+      gold.update()
+      if (gold.y > this.canvas.height) {
+        this.goldObjects.splice(index, 1)
       }
     })
 
@@ -423,6 +664,10 @@ class SpaceShooter {
     this.powerUps.push(new PowerUp(x, -30, selectedType))
   }
 
+  spawnGold(x: number, y: number, value: number) {
+    this.goldObjects.push(new Gold(x, y, value))
+  }
+
   checkCollisions() {
     // Player bullets vs enemies
     this.bullets.forEach((bullet, bulletIndex) => {
@@ -448,9 +693,12 @@ class SpaceShooter {
             this.score += enemy.scoreValue
             this.playSound(enemy.type === "boss" ? 150 : 300, enemy.type === "boss" ? 0.5 : 0.2)
 
-            // Chance to drop power-up
+            // Chance to drop power-up or gold
             if (Math.random() < 0.15) {
               this.spawnPowerUp()
+            } else if (Math.random() < 0.3) {
+              // Higher chance for gold
+              this.spawnGold(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, enemy.scoreValue / 2)
             }
           }
         }
@@ -514,6 +762,21 @@ class SpaceShooter {
         this.createPowerUpEffect(this.player.x + this.player.width / 2, this.player.y + this.player.height / 2)
       }
     })
+
+    // Gold objects vs player (auto-collect nearby)
+    this.goldObjects.forEach((gold, goldIndex) => {
+      const distance = Math.sqrt(
+        Math.pow(gold.x + gold.width / 2 - (this.player.x + this.player.width / 2), 2) +
+          Math.pow(gold.y + gold.height / 2 - (this.player.y + this.player.height / 2), 2),
+      )
+      const collectRadius = this.player.width * 1.5 // Player's collection radius
+
+      if (distance < collectRadius) {
+        this.player.addGold(gold.value)
+        this.goldObjects.splice(goldIndex, 1)
+        this.playSound(1500, 0.05, "triangle", 0.03) // Gold collection sound
+      }
+    })
   }
 
   isColliding(obj1: any, obj2: any): boolean {
@@ -550,6 +813,11 @@ class SpaceShooter {
     this.gameState = "levelComplete"
     this.levelTransitionTimer = 180 // 3 seconds at 60fps
     this.playSound(800, 1, "sine", 0.1)
+    if (this.currentLevel >= this.lastReachedLevel) {
+      this.lastReachedLevel = this.currentLevel + 1
+      localStorage.setItem("spaceShooterLastLevel", this.lastReachedLevel.toString())
+    }
+    this.pauseMusic()
   }
 
   gameOver() {
@@ -558,6 +826,7 @@ class SpaceShooter {
       this.highScore = this.score
       localStorage.setItem("spaceShooterHighScore", this.highScore.toString())
     }
+    this.pauseMusic()
   }
 
   render() {
@@ -572,8 +841,14 @@ class SpaceShooter {
     // Draw animated background
     this.drawAnimatedBackground()
 
-    if (this.gameState === "menu") {
-      this.drawMenu()
+    if (this.gameState === "mainMenu") {
+      this.drawMainMenu()
+    } else if (this.gameState === "levelSelect") {
+      this.drawLevelSelect()
+    } else if (this.gameState === "powerUpMenu") {
+      this.drawPowerUpMenu()
+    } else if (this.gameState === "settingsMenu") {
+      this.drawSettingsMenu()
     } else if (this.gameState === "playing") {
       this.drawGame()
     } else if (this.gameState === "levelComplete") {
@@ -617,7 +892,7 @@ class SpaceShooter {
     this.level.drawBackground(this.ctx, this.canvas.width, this.canvas.height, this.backgroundOffset)
   }
 
-  drawMenu() {
+  drawMainMenu() {
     // Title with glow effect
     this.ctx.shadowColor = "#00ff00"
     this.ctx.shadowBlur = 20
@@ -632,23 +907,224 @@ class SpaceShooter {
     this.ctx.font = "24px monospace"
     this.ctx.fillText("Elite Space Combat", this.canvas.width / 2, 200)
 
-    // Instructions
-    this.ctx.font = "20px monospace"
-    this.ctx.fillText("Click or Press SPACE to Start", this.canvas.width / 2, 300)
-    this.ctx.fillText(`High Score: ${this.highScore}`, this.canvas.width / 2, 350)
+    // Menu Buttons
+    this.drawButton(this.canvas.width / 2, 325, 200, 50, "Start Game", "#00cc00")
+    this.drawButton(this.canvas.width / 2, 385, 200, 50, "Power Up", "#0088cc")
+    this.drawButton(this.canvas.width / 2, 445, 200, 50, "Settings", "#cc8800")
 
-    // Controls
+    this.ctx.fillStyle = "#ffffff"
+    this.ctx.font = "20px monospace"
+    this.ctx.fillText(`High Score: ${this.highScore}`, this.canvas.width / 2, 550)
+    this.ctx.fillText(`Last Level: ${this.lastReachedLevel}`, this.canvas.width / 2, 580)
+  }
+
+  drawLevelSelect() {
+    this.ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
+
+    this.ctx.fillStyle = "#00ffff"
+    this.ctx.font = "bold 48px monospace"
+    this.ctx.textAlign = "center"
+    this.ctx.fillText("SELECT LEVEL", this.canvas.width / 2, 100)
+
+    // Back button
+    this.drawButton(70, 45, 100, 50, "Back", "#cc0000")
+
+    for (let i = 1; i <= this.lastReachedLevel; i++) {
+      const buttonText = `Level ${i}`
+      const buttonColor = i <= this.lastReachedLevel ? "#00cc00" : "#555555"
+      this.drawButton(this.canvas.width / 2, 220 + i * 60, 200, 40, buttonText, buttonColor)
+    }
+  }
+
+  drawPowerUpMenu() {
+    this.ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
+
+    this.ctx.fillStyle = "#00ffff"
+    this.ctx.font = "bold 48px monospace"
+    this.ctx.textAlign = "center"
+    this.ctx.fillText("POWER UP STORE", this.canvas.width / 2, 100)
+
+    // Back button
+    this.drawButton(70, 45, 100, 50, "Back", "#cc0000")
+
+    this.ctx.fillStyle = "#ffff00"
+    this.ctx.font = "bold 28px monospace"
+    this.ctx.textAlign = "left"
+    this.ctx.fillText(`Gold: ${this.player.gold}`, this.canvas.width / 2 - 100, 180)
+
+    // Upgrade sections
+    this.drawUpgradeCard(
+      "Damage",
+      this.player.damageLevel,
+      this.player.maxDamageLevel,
+      this.player.upgradeCosts.damage,
+      "Increases bullet damage",
+      (level) => `x${(1 + level * 0.5).toFixed(1)}`,
+      0,
+    )
+    this.drawUpgradeCard(
+      "Defense",
+      this.player.defenseLevel,
+      this.player.maxDefenseLevel,
+      this.player.upgradeCosts.defense,
+      "Increases shield durability",
+      (level) => `${[8, 10, 12, 15][level]} hits`,
+      1,
+    )
+    this.drawUpgradeCard(
+      "Health",
+      this.player.healthLevel,
+      this.player.maxHealthLevel,
+      this.player.upgradeCosts.health,
+      "Increases max health",
+      (level) => `${[100, 120, 150, 200][level]} HP`,
+      2,
+    )
+  }
+
+  drawUpgradeCard(
+    name: string,
+    currentLevel: number,
+    maxLevel: number,
+    costs: number[],
+    description: string,
+    effectText: (level: number) => string,
+    index: number,
+  ) {
+    const cardWidth = 350
+    const cardHeight = 120
+    const cardX = this.canvas.width / 2 - cardWidth / 2
+    const cardY = 220 + index * 150
+    const borderRadius = 10
+
+    // Card background
+    this.ctx.fillStyle = "rgba(20, 20, 50, 0.8)"
+    this.roundRect(this.ctx, cardX, cardY, cardWidth, cardHeight, borderRadius)
+    this.ctx.fill()
+
+    // Card border
+    this.ctx.strokeStyle = "#00ffff"
+    this.ctx.lineWidth = 2
+    this.roundRect(this.ctx, cardX, cardY, cardWidth, cardHeight, borderRadius)
+    this.ctx.stroke()
+
+    // Title
+    this.ctx.fillStyle = "#ffffff"
+    this.ctx.font = "bold 24px monospace"
+    this.ctx.textAlign = "left"
+    this.ctx.fillText(name, cardX + 20, cardY + 30)
+
+    // Level and Description
     this.ctx.font = "16px monospace"
     this.ctx.fillStyle = "#cccccc"
-    this.ctx.fillText("CONTROLS:", this.canvas.width / 2, 420)
-    this.ctx.fillText("A/D or ←/→ - Move", this.canvas.width / 2, 450)
-    this.ctx.fillText("SPACE - Shoot", this.canvas.width / 2, 470)
-    this.ctx.fillText("X - Special Ability", this.canvas.width / 2, 490)
-    this.ctx.fillText("P - Pause", this.canvas.width / 2, 510)
+    this.ctx.fillText(`Level: ${currentLevel} / ${maxLevel}`, cardX + 20, cardY + 55)
+    this.ctx.fillText(description, cardX + 20, cardY + 75)
 
-    // Features
-    this.ctx.fillStyle = "#ffff00"
-    this.ctx.fillText("• Multiple Levels • Power-ups • Boss Battles •", this.canvas.width / 2, 580)
+    // Current Effect
+    this.ctx.fillStyle = "#00ff00"
+    this.ctx.fillText(`Current: ${effectText(currentLevel)}`, cardX + 20, cardY + 95)
+
+    // Upgrade Button
+    const buttonWidth = 150
+    const buttonHeight = 40
+    const buttonX = cardX + cardWidth - buttonWidth - 20
+    const buttonY = cardY + cardHeight - buttonHeight - 10
+
+    if (currentLevel < maxLevel) {
+      const cost = costs[currentLevel]
+      const canAfford = this.player.gold >= cost
+      const buttonColor = canAfford ? "#00cc00" : "#555555"
+      this.drawButton(
+        buttonX + buttonWidth / 2,
+        buttonY + buttonHeight / 2,
+        buttonWidth,
+        buttonHeight,
+        `Upgrade (${cost}G)`,
+        buttonColor,
+        !canAfford,
+        18, // Smaller font size for button text
+      )
+    } else {
+      this.ctx.fillStyle = "#00ff00"
+      this.ctx.font = "bold 20px monospace"
+      this.ctx.textAlign = "right"
+      this.ctx.fillText("MAX LEVEL", cardX + cardWidth - 20, cardY + cardHeight - 25)
+    }
+  }
+
+  roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+    ctx.beginPath()
+    ctx.moveTo(x + radius, y)
+    ctx.lineTo(x + width - radius, y)
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius)
+    ctx.lineTo(x + width, y + height - radius)
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height)
+    ctx.lineTo(x + radius, y + height)
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius)
+    ctx.lineTo(x, y + radius)
+    ctx.quadraticCurveTo(x, y, x + radius, y)
+    ctx.closePath()
+  }
+
+  drawSettingsMenu() {
+    this.ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
+
+    this.ctx.fillStyle = "#00ffff"
+    this.ctx.font = "bold 48px monospace"
+    this.ctx.textAlign = "center"
+    this.ctx.fillText("SETTINGS", this.canvas.width / 2, 100)
+
+    // Back button
+    this.drawButton(70, 45, 100, 50, "Back", "#cc0000")
+
+    // Music Volume
+    this.ctx.fillStyle = "#ffffff"
+    this.ctx.font = "28px monospace"
+    this.ctx.textAlign = "left"
+    this.ctx.fillText("Music Volume:", this.canvas.width / 2 - 200, 300)
+    this.ctx.fillText(`${Math.round(this.musicVolume * 100)}%`, this.canvas.width / 2 + 20, 300)
+    this.drawButton(this.canvas.width / 2 - 100, 300, 40, 40, "-", "#cc0000", false, 24)
+    this.drawButton(this.canvas.width / 2 + 100, 300, 40, 40, "+", "#00cc00", false, 24)
+
+    // SFX Volume
+    this.ctx.fillStyle = "#ffffff"
+    this.ctx.fillText("SFX Volume:", this.canvas.width / 2 - 200, 400)
+    this.ctx.fillText(`${Math.round(this.sfxVolume * 100)}%`, this.canvas.width / 2 + 20, 400)
+    this.drawButton(this.canvas.width / 2 - 100, 400, 40, 40, "-", "#cc0000", false, 24)
+    this.drawButton(this.canvas.width / 2 + 100, 400, 40, 40, "+", "#00cc00", false, 24)
+  }
+
+  drawButton(
+    centerX: number,
+    centerY: number,
+    width: number,
+    height: number,
+    text: string,
+    color: string,
+    disabled = false,
+    fontSize = 24, // Added fontSize parameter
+  ) {
+    const x = centerX - width / 2
+    const y = centerY - height / 2
+    const borderRadius = 8
+
+    this.ctx.fillStyle = disabled ? "#333333" : color
+    this.roundRect(this.ctx, x, y, width, height, borderRadius)
+    this.ctx.fill()
+
+    this.ctx.strokeStyle = "#ffffff"
+    this.ctx.lineWidth = 2
+    this.roundRect(this.ctx, x, y, width, height, borderRadius)
+    this.ctx.stroke()
+
+    this.ctx.fillStyle = "#ffffff"
+    this.ctx.font = `bold ${fontSize}px monospace` // Use fontSize
+    this.ctx.textAlign = "center"
+    this.ctx.textBaseline = "middle"
+    this.ctx.fillText(text, centerX, centerY)
   }
 
   drawGame() {
@@ -668,6 +1144,9 @@ class SpaceShooter {
     // Draw power-ups
     this.powerUps.forEach((powerUp) => powerUp.draw(this.ctx))
 
+    // Draw gold objects
+    this.goldObjects.forEach((gold) => gold.draw(this.ctx))
+
     // Draw particles (on top)
     this.particles.forEach((particle) => particle.draw(this.ctx))
 
@@ -686,6 +1165,7 @@ class SpaceShooter {
     this.ctx.textAlign = "left"
     this.ctx.fillText(`Score: ${this.score}`, 20, 30)
     this.ctx.fillText(`Level: ${this.currentLevel}`, 20, 55)
+    this.ctx.fillText(`Gold: ${this.player.gold}`, 20, 75) // Display gold
 
     // Lives with heart icons
     this.ctx.fillText("Lives:", 250, 30)
@@ -739,7 +1219,6 @@ class SpaceShooter {
     this.ctx.fillStyle = "rgba(0, 0, 0, 0.8)"
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
 
-    // Level complete text
     this.ctx.shadowColor = "#00ff00"
     this.ctx.shadowBlur = 15
     this.ctx.fillStyle = "#00ff00"
@@ -751,7 +1230,10 @@ class SpaceShooter {
     this.ctx.fillStyle = "#ffffff"
     this.ctx.font = "24px monospace"
     this.ctx.fillText(`Level ${this.currentLevel} Cleared!`, this.canvas.width / 2, 350)
-    this.ctx.fillText("Click or Press SPACE for Next Level", this.canvas.width / 2, 400)
+
+    // New buttons for choice
+    this.drawButton(this.canvas.width / 2 - 100, 425, 180, 50, "Next Level", "#00cc00")
+    this.drawButton(this.canvas.width / 2 + 100, 425, 180, 50, "Main Menu", "#0088cc")
   }
 
   drawPaused() {
@@ -795,9 +1277,7 @@ class SpaceShooter {
       this.ctx.fillText("NEW HIGH SCORE!", this.canvas.width / 2, 440)
     }
 
-    this.ctx.fillStyle = "#cccccc"
-    this.ctx.font = "20px monospace"
-    this.ctx.fillText("Click or Press SPACE to Restart", this.canvas.width / 2, 500)
+    this.drawButton(this.canvas.width / 2, 505, 200, 50, "Restart", "#00cc00")
   }
 
   gameLoop(currentTime: number) {
@@ -814,6 +1294,12 @@ class SpaceShooter {
     if (this.animationId) {
       cancelAnimationFrame(this.animationId)
     }
+    this.pauseMusic()
+    // Remove the URL.revokeObjectURL call as it's no longer needed with direct src assignment
+    // if (this.backgroundMusic && this.backgroundMusic.src.startsWith("blob:")) {
+    //   URL.revokeObjectURL(this.backgroundMusic.src)
+    //   console.log("Revoked blob URL for background music.")
+    // }
   }
 }
 
@@ -971,8 +1457,24 @@ class Player {
   maxHealth: number
   invulnerable: boolean
   invulnerableTime: number
+  thrusterIntensity: number // Added for visual feedback
+  gold: number // New: Player's gold count
+  damageLevel: number // New: Upgrade level for damage
+  defenseLevel: number // New: Upgrade level for defense (shield)
+  healthLevel: number // New: Upgrade level for health
+  maxDamageLevel: number
+  maxDefenseLevel: number
+  maxHealthLevel: number
+  upgradeCosts: { damage: number[]; defense: number[]; health: number[] }
 
-  constructor(x: number, y: number) {
+  constructor(
+    x: number,
+    y: number,
+    initialGold = 0,
+    initialDamageLevel = 0,
+    initialDefenseLevel = 0,
+    initialHealthLevel = 0,
+  ) {
     this.x = x
     this.y = y
     this.width = 40
@@ -995,6 +1497,94 @@ class Player {
     this.maxHealth = 100
     this.invulnerable = false
     this.invulnerableTime = 0
+    this.thrusterIntensity = 0
+
+    // Gold and Upgrades
+    this.gold = Number.parseInt(localStorage.getItem("playerGold") || initialGold.toString())
+    this.damageLevel = Number.parseInt(localStorage.getItem("playerDamageLevel") || initialDamageLevel.toString())
+    this.defenseLevel = Number.parseInt(localStorage.getItem("playerDefenseLevel") || initialDefenseLevel.toString())
+    this.healthLevel = Number.parseInt(localStorage.getItem("playerHealthLevel") || initialHealthLevel.toString())
+
+    this.maxDamageLevel = 3
+    this.maxDefenseLevel = 3
+    this.maxHealthLevel = 3
+
+    this.upgradeCosts = {
+      damage: [50, 150, 300], // Costs for level 1, 2, 3
+      defense: [75, 200, 400],
+      health: [100, 250, 500],
+    }
+
+    this.applyUpgrades() // Apply initial upgrades from loaded data
+  }
+
+  applyUpgrades() {
+    // Apply damage upgrade
+    const damageMultipliers = [1, 1.2, 1.5, 2] // Base, L1, L2, L3
+    this.shootDelay = 150 / damageMultipliers[this.damageLevel]
+
+    // Apply defense upgrade
+    const defenseShieldHits = [8, 10, 12, 15] // Base, L1, L2, L3
+    this.maxShieldHits = defenseShieldHits[this.defenseLevel]
+
+    // Apply health upgrade
+    const healthValues = [100, 120, 150, 200] // Base, L1, L2, L3
+    this.maxHealth = healthValues[this.healthLevel]
+    this.health = Math.min(this.health, this.maxHealth) // Cap current health at new max
+  }
+
+  upgradeDamage() {
+    if (this.damageLevel < this.maxDamageLevel) {
+      const cost = this.upgradeCosts.damage[this.damageLevel]
+      if (this.gold >= cost) {
+        this.gold -= cost
+        this.damageLevel++
+        this.applyUpgrades()
+        this.savePlayerStats()
+        return true
+      }
+    }
+    return false
+  }
+
+  upgradeDefense() {
+    if (this.defenseLevel < this.maxDefenseLevel) {
+      const cost = this.upgradeCosts.defense[this.defenseLevel]
+      if (this.gold >= cost) {
+        this.gold -= cost
+        this.defenseLevel++
+        this.applyUpgrades()
+        this.savePlayerStats()
+        return true
+      }
+    }
+    return false
+  }
+
+  upgradeHealth() {
+    if (this.healthLevel < this.maxHealthLevel) {
+      const cost = this.upgradeCosts.health[this.healthLevel]
+      if (this.gold >= cost) {
+        this.gold -= cost
+        this.healthLevel++
+        this.applyUpgrades()
+        this.savePlayerStats()
+        return true
+      }
+    }
+    return false
+  }
+
+  savePlayerStats() {
+    localStorage.setItem("playerGold", this.gold.toString())
+    localStorage.setItem("playerDamageLevel", this.damageLevel.toString())
+    localStorage.setItem("playerDefenseLevel", this.defenseLevel.toString())
+    localStorage.setItem("playerHealthLevel", this.healthLevel.toString())
+  }
+
+  addGold(amount: number) {
+    this.gold += amount
+    this.savePlayerStats()
   }
 
   update(
@@ -1055,20 +1645,22 @@ class Player {
     const laserPowerUp = this.activePowerUps.find((p) => p.type === "laser")
     const piercingPowerUp = this.activePowerUps.find((p) => p.type === "piercing")
 
+    const baseDamage = 1 + this.damageLevel * 0.5 // Damage scales with level
+
     if (laserPowerUp) {
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -12, "#ff00ff", "laser", 0, 3))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -12, "#ff00ff", "laser", 0, baseDamage * 3))
     } else if (spreadPowerUp) {
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, "#00ff00", "normal"))
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -9, "#00ff00", "normal", -2))
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -9, "#00ff00", "normal", 2))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, "#00ff00", "normal", 0, baseDamage))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -9, "#00ff00", "normal", -2, baseDamage))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -9, "#00ff00", "normal", 2, baseDamage))
     } else if (multiShotPowerUp) {
-      bullets.push(new Bullet(this.x + 5, this.y - 10, -10, "#00ff00", "normal"))
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, "#00ff00", "normal"))
-      bullets.push(new Bullet(this.x + this.width - 9, this.y - 10, -10, "#00ff00", "normal"))
+      bullets.push(new Bullet(this.x + 5, this.y - 10, -10, "#00ff00", "normal", 0, baseDamage))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, "#00ff00", "normal", 0, baseDamage))
+      bullets.push(new Bullet(this.x + this.width - 9, this.y - 10, -10, "#00ff00", "normal", 0, baseDamage))
     } else {
       const bulletType = piercingPowerUp ? "piercing" : "normal"
       const bulletColor = piercingPowerUp ? "#ffff00" : "#00ff00"
-      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, bulletColor, bulletType))
+      bullets.push(new Bullet(this.x + this.width / 2 - 2, this.y - 10, -10, bulletColor, bulletType, 0, baseDamage))
     }
 
     this.lastShot = Date.now()
@@ -1229,10 +1821,10 @@ class Player {
       rapidFire: "R",
       spread: "S",
       laser: "L",
-      shield: "◊",
-      bomb: "B",
       multiShot: "M",
       piercing: "P",
+      shield: "◊",
+      bomb: "B",
     }
     return symbols[type as keyof typeof symbols] || "?"
   }
@@ -1732,6 +2324,67 @@ class PowerUp {
     }
 
     ctx.fillText(symbols[this.type as keyof typeof symbols] || "?", 0, 0)
+
+    ctx.restore()
+  }
+}
+
+class Gold {
+  x: number
+  y: number
+  width: number
+  height: number
+  speed: number
+  value: number
+  rotation: number
+  pulsePhase: number
+
+  constructor(x: number, y: number, value: number) {
+    this.x = x
+    this.y = y
+    this.width = 25 // Increased size
+    this.height = 25 // Increased size
+    this.speed = 1.5
+    this.value = Math.max(1, Math.floor(value)) // Ensure value is at least 1
+    this.rotation = 0
+    this.pulsePhase = 0
+  }
+
+  update() {
+    this.y += this.speed
+    this.rotation += 0.08 // Slightly faster rotation
+    this.pulsePhase += 0.15 // Slightly faster pulse
+  }
+
+  draw(ctx: CanvasRenderingContext2D) {
+    ctx.save()
+    ctx.translate(this.x + this.width / 2, this.y + this.height / 2)
+    ctx.rotate(this.rotation)
+
+    // Pulsing glow effect
+    const pulseAlpha = 0.6 + Math.sin(this.pulsePhase) * 0.4 // More pronounced pulse
+    ctx.shadowColor = "#ffff00"
+    ctx.shadowBlur = 15 // Increased blur
+    ctx.globalAlpha = pulseAlpha
+
+    // Draw gold coin shape
+    ctx.fillStyle = "#ffd700" // Gold color
+    ctx.beginPath()
+    ctx.arc(0, 0, this.width / 2, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Inner detail with a slight offset for depth
+    ctx.fillStyle = "#ccaa00"
+    ctx.beginPath()
+    ctx.arc(0, 0, (this.width / 2) * 0.7, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Gold symbol with stronger contrast
+    ctx.fillStyle = "#444400" // Darker color for contrast
+    ctx.font = "bold 16px monospace" // Larger font
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+    ctx.fillText("G", 0, 0)
 
     ctx.restore()
   }
